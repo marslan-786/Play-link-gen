@@ -9,7 +9,6 @@ const app = express();
 app.use(cors());
 
 const PORT = process.env.PORT || 8080;
-// اگر ریلوے (Railway) وغیرہ پر ہوسٹ کریں تو وہاں کی ڈومین کا ویری ایبل یہاں آئے گا
 const HOST = process.env.HOST_URL || `https://play-link-gen-production.up.railway.app`; 
 
 // ویڈیوز محفوظ کرنے کے لیے فولڈر بنائیں
@@ -18,82 +17,141 @@ if (!fs.existsSync(VIDEOS_DIR)) {
     fs.mkdirSync(VIDEOS_DIR);
 }
 
+// کیشنگ کے لیے میموری ابجیکٹ
+// سٹرکچر: { "video_url_resolution": { fileName, title, resolution, timestamp } }
+const urlCache = {}; 
+
 app.get('/api/download', async (req, res) => {
     const { url, resolution } = req.query;
+    const resValue = resolution || '360';
 
     if (!url) {
         return res.status(400).json({ success: false, message: "URL is required" });
     }
 
+    // 1. کیشے چیک کریں (Cache Check)
+    const cacheKey = `${url}_${resValue}`;
+    if (urlCache[cacheKey]) {
+        const cachedData = urlCache[cacheKey];
+        const filePath = path.join(VIDEOS_DIR, cachedData.fileName);
+        
+        // چیک کریں کہ کیا فائل واقعی ہارڈ ڈرائیو پر موجود ہے اور 2 گھنٹے سے پرانی تو نہیں
+        const isFileExists = fs.existsSync(filePath);
+        const isNotExpired = (Date.now() - cachedData.timestamp) < (2 * 60 * 60 * 1000);
+
+        if (isFileExists && isNotExpired) {
+            console.log(`Served from Cache: ${cachedData.title}`);
+            return res.json({
+                success: true,
+                title: cachedData.title,
+                resolution: cachedData.resolution,
+                download_url: `${HOST}/play/${cachedData.fileName}`,
+                is_cached: true // یہ بتانے کے لیے کہ رسپانس کیشے سے آیا ہے
+            });
+        } else {
+            // اگر فائل ڈیلیٹ ہو چکی ہے یا ایکسپائر ہو گئی ہے تو کیشے سے نکال دیں
+            delete urlCache[cacheKey];
+        }
+    }
+
+    // 2. اگر کیشے میں نہیں ہے تو ڈاؤن لوڈ کریں
     try {
-        // 1. اوریجنل API کو کال کریں
-        const originalApiUrl = `https://silent-yt-dwn.up.railway.app/api/download?url=${encodeURIComponent(url)}&resolution=${resolution || '360'}`;
+        const originalApiUrl = `https://silent-yt-dwn.up.railway.app/api/download?url=${encodeURIComponent(url)}&resolution=${resValue}`;
         const response = await axios.get(originalApiUrl);
         const data = response.data;
 
-        // اگر اوریجنل API سے ایرر آئے
         if (!data.success) {
             return res.json(data);
         }
 
-        // 2. ویڈیو کے لیے ایک منفرد نام بنائیں
         const fileName = `video_${Date.now()}.mp4`;
         const filePath = path.join(VIDEOS_DIR, fileName);
 
-        console.log(`Downloading and processing: ${data.title}...`);
+        console.log(`Downloading new video: ${data.title}...`);
 
-        // 3. FFmpeg کمانڈ: ویڈیو ڈاؤن لوڈ کرے گی اور moov atom کو شروع میں رکھے گی
         const ffmpegCommand = `ffmpeg -i "${data.download_url}" -c copy -movflags faststart "${filePath}"`;
 
         exec(ffmpegCommand, (error, stdout, stderr) => {
             if (error) {
-                console.error("FFmpeg error:", error);
+                console.error(`[FFmpeg Error] Processing failed for: ${data.title}`);
                 return res.status(500).json({ success: false, message: "Error processing video with FFmpeg" });
             }
             
-            console.log(`Processing complete: ${fileName}`);
+            console.log(`Download complete: ${fileName}`);
 
-            // 4. آپ کی ڈیمانڈ کے مطابق بالکل سیم JSON رسپانس، بس لنک ہمارا اپنا ہوگا
+            // 3. کیشے میں محفوظ کریں (Save to Cache)
+            urlCache[cacheKey] = {
+                fileName: fileName,
+                title: data.title,
+                resolution: data.resolution,
+                timestamp: Date.now()
+            };
+
             const playUrl = `${HOST}/play/${fileName}`;
             
             res.json({
                 success: true,
                 title: data.title,
                 resolution: data.resolution,
-                download_url: playUrl
+                download_url: playUrl,
+                is_cached: false
             });
         });
 
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ success: false, message: "Internal Server Error" });
+        // 4. کلین ایرر ہینڈلنگ (Clean Error Handling)
+        if (error.response) {
+            // جب پیچھے والی API (Original API) 500 یا کوئی اور ایرر دے
+            console.error(`[Original API Error] Status: ${error.response.status} - Target URL: ${url}`);
+            return res.status(error.response.status).json({ 
+                success: false, 
+                message: `Original API returned error: ${error.response.status}`,
+            });
+        } else if (error.request) {
+            // جب پیچھے والی API رسپانس ہی نہ دے (Timeout/Offline)
+            console.error(`[Network Error] Original API is unreachable.`);
+            return res.status(503).json({ success: false, message: "Original API is offline or unreachable." });
+        } else {
+            // کوئی اور انٹرنل ایرر
+            console.error(`[Internal Error] ${error.message}`);
+            return res.status(500).json({ success: false, message: "Internal Server Error" });
+        }
     }
 });
 
-// یہ روٹ ویڈیو کو پلے (Stream) کروانے کے لیے ہے۔ Express خود بخود Range Headers ہینڈل کرتا ہے۔
+// ویڈیو پلے کرنے کا روٹ
 app.use('/play', express.static(VIDEOS_DIR, {
     setHeaders: function (res, path, stat) {
-        res.set('Content-Disposition', 'inline'); // ڈاؤن لوڈ کے بجائے پلے کروائے گا
+        res.set('Content-Disposition', 'inline'); 
         res.set('Content-Type', 'video/mp4');
     }
 }));
 
-// سرور کو کریش ہونے سے بچانے کے لیے آٹو کلین اپ (ہر 1 گھنٹے بعد چلے گا)
+// آٹو کلین اپ (ہر 1 گھنٹے بعد چلے گا)
 setInterval(() => {
+    const now = Date.now();
+    
+    // 1. پرانی ویڈیوز ڈیلیٹ کریں
     fs.readdir(VIDEOS_DIR, (err, files) => {
         if (err) return;
-        const now = Date.now();
         files.forEach(file => {
             const filePath = path.join(VIDEOS_DIR, file);
             fs.stat(filePath, (err, stats) => {
                 if (err) return;
-                // اگر فائل 2 گھنٹے سے زیادہ پرانی ہے تو اسے ڈیلیٹ کر دیں
+                // 2 گھنٹے (2 * 60 * 60 * 1000 ms) سے پرانی فائلز
                 if (now - stats.mtimeMs > 2 * 60 * 60 * 1000) {
-                    fs.unlink(filePath, () => console.log(`Deleted old file: ${file}`));
+                    fs.unlink(filePath, () => console.log(`Deleted expired file: ${file}`));
                 }
             });
         });
     });
+
+    // 2. پرانے لنکس کو RAM کیشے سے بھی نکالیں تاکہ میموری فل نہ ہو
+    for (const key in urlCache) {
+        if (now - urlCache[key].timestamp > 2 * 60 * 60 * 1000) {
+            delete urlCache[key];
+        }
+    }
 }, 60 * 60 * 1000);
 
 app.listen(PORT, () => {
