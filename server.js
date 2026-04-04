@@ -10,7 +10,7 @@ app.use(cors());
 
 const PORT = process.env.PORT || 8080;
 // اگر ریلوے (Railway) وغیرہ پر ہوسٹ کریں تو وہاں کی ڈومین کا ویری ایبل یہاں آئے گا
-const HOST = process.env.HOST_URL || `http://0.0.0.0:${PORT}`; 
+const HOST = process.env.HOST_URL || `https://play-link-gen-production.up.railway.app:${PORT}`; 
 
 // ویڈیوز محفوظ کرنے کے لیے فولڈر بنائیں
 const VIDEOS_DIR = path.join(__dirname, 'videos');
