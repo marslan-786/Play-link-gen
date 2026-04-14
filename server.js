@@ -56,7 +56,7 @@ app.get('/api/download', async (req, res) => {
 
     // 2. اگر کیشے میں نہیں ہے تو ڈاؤن لوڈ کریں
     try {
-        const originalApiUrl = `https://silent-yt-dwn.up.railway.app/api/download?url=${encodeURIComponent(url)}&resolution=${resValue}`;
+        const originalApiUrl = `https://plg-yt-dwn.up.railway.app/api/download?url=${encodeURIComponent(url)}&resolution=${resValue}`;
         const response = await axios.get(originalApiUrl);
         const data = response.data;
 
